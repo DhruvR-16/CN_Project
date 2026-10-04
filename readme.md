@@ -8,10 +8,10 @@ The setup uses four Macs on the same private LAN.
 
 | Machine | Role | Private IP | Interface |
 |---|---|---|---|
-| Mac 1 | DNS server (`dnsmasq`) | `10.3.3.183` | `en0` |
-| Mac 2 | Nginx reverse proxy, HTTPS and load balancer | `10.3.3.179` | `en0` |
-| Mac 3 | Backend A | `10.3.3.173` | `en0` |
-| Mac 4 | Backend B | `10.3.3.169` | `en0` |
+| Mac 1 (Akhilesh Kumar) | DNS server (`dnsmasq`) | `10.3.3.183` | `en0` |
+| Mac 2 (Kavya Jain) | Nginx reverse proxy, HTTPS and load balancer | `10.3.3.179` | `en0` |
+| Mac 3 (Dhruv Ramani) | Backend A | `10.3.3.173` | `en0` |
+| Mac 4 (Lakshya Agrawal) | Backend B | `10.3.3.169` | `en0` |
 
 The local names `app.team1.test` and `api.team1.test` resolve to the Nginx machine. Nginx forwards incoming requests to either backend over HTTP, while clients connect to Nginx over HTTPS.
 

@@ -8,10 +8,10 @@ The setup uses four Macs on the same private LAN.
 
 | Machine | Role | Private IP | Interface |
 |---|---|---|---|
-| Mac 1 (Akhilesh Kumar) | DNS server (`dnsmasq`) | `10.3.3.183` | `en0` |
-| Mac 2 (Kavya Jain) | Nginx reverse proxy, HTTPS and load balancer | `10.3.3.179` | `en0` |
-| Mac 3 (Dhruv Ramani) | Backend A | `10.3.3.173` | `en0` |
-| Mac 4 (Lakshya Agrawal) | Backend B | `10.3.3.169` | `en0` |
+| Mac 1 (Akhilesh Kumar) | DNS server (`dnsmasq`) | `10.7.13.217` | `en0` |
+| Mac 2 (Kavya Jain) | Nginx reverse proxy, HTTPS and load balancer | `10.7.26.222` | `en0` |
+| Mac 3 (Dhruv Ramani) | Backend A | `10.7.30.216` | `en0` |
+| Mac 4 (Lakshya Agrawal) | Backend B | `10.7.15.193` | `en0` |
 
 The local names `app.team1.test` and `api.team1.test` resolve to the Nginx machine. Nginx forwards incoming requests to either backend over HTTP, while clients connect to Nginx over HTTPS.
 
@@ -44,11 +44,11 @@ Add the following project entries to the `dnsmasq.conf` file:
 
 ```ini
 interface=en0
-listen-address=127.0.0.1,10.3.3.183
+listen-address=127.0.0.1,10.7.13.217
 bind-interfaces
 
-address=/app.team1.test/10.3.3.179
-address=/api.team1.test/10.3.3.179
+address=/app.team1.test/10.7.26.222
+address=/api.team1.test/10.7.26.222
 ```
 
 Restart `dnsmasq` after saving the configuration. The exact configuration path depends on the Homebrew installation.
@@ -56,19 +56,13 @@ Restart `dnsmasq` after saving the configuration. The exact configuration path d
 Test the DNS records from a client machine:
 
 ```bash
-dig @10.3.3.183 app.team1.test
-dig @10.3.3.183 api.team1.test
+dig @10.7.13.217 app.team1.test
+dig @10.7.13.217 api.team1.test
 ```
 
-Both names should resolve to `10.3.3.179`.
+Both names should resolve to `10.7.26.222`.
 
-For the client to use Mac 1 automatically, configure its DNS resolver to use `10.3.3.183`. Then verify the default resolver:
-
-```bash
-dig app.team1.test
-```
-
-The `SERVER` line should identify the private DNS server.
+These direct queries leave each Mac's Wi-Fi DNS setting unchanged. A plain `dig app.team1.test` tests the Mac's existing resolver configuration, which may not use the project DNS server.
 
 ## 2. Start Backend A
 
@@ -94,14 +88,14 @@ Both servers provide JSON responses. The `X-Backend` response header identifies 
 
 ## 4. Configure Nginx
 
-On Mac 2, configure Nginx to listen on HTTPS port `443` and forward requests to both backends.
+On Mac 2, configure Nginx to listen on HTTPS port `8443` and forward requests to both backends.
 
 The upstream section should use the current backend addresses:
 
 ```nginx
 upstream team1_backends {
-    server 10.3.3.173:3001 max_fails=1 fail_timeout=10s;
-    server 10.3.3.169:3002 max_fails=1 fail_timeout=10s;
+    server 10.7.30.216:3001 max_fails=1 fail_timeout=10s;
+    server 10.7.15.193:3002 max_fails=1 fail_timeout=10s;
 }
 ```
 
@@ -109,7 +103,7 @@ The HTTPS server should use the names and certificate files below. Replace the c
 
 ```nginx
 server {
-    listen 443 ssl;
+    listen 8443 ssl;
     server_name app.team1.test api.team1.test;
 
     ssl_certificate /absolute/path/to/tls/server.crt;
@@ -121,6 +115,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 2;
     }
 }
 ```
@@ -128,7 +123,7 @@ server {
 Keep the `events` and `http` blocks required by the complete Nginx configuration file. Before restarting Nginx, validate the configuration:
 
 ```bash
-nginx -t
+nginx -t -c "$PWD/nginx/nginx.conf"
 ```
 
 If the test succeeds, reload or restart Nginx using the method used for your installation.
@@ -146,7 +141,7 @@ Because the project uses a self-signed certificate, provide the certificate to `
 
 ```bash
 curl --cacert /absolute/path/to/tls/server.crt \
-  https://app.team1.test/api/status
+  https://app.team1.test:8443/api/status
 ```
 
 This verifies the HTTPS connection without disabling certificate verification.
@@ -192,7 +187,7 @@ To test conditional requests, send the matching ETag:
 ```bash
 curl --cacert /absolute/path/to/tls/server.crt \
   -H 'If-None-Match: "team1-cache-v1"' \
-  -i https://app.team1.test/api/cache
+  -i https://app.team1.test:8443/api/cache
 ```
 
 When the resource matches that ETag, the backend implementation returns `304 Not Modified`.
@@ -215,7 +210,7 @@ The private DNS server should resolve the project names. The public resolver is 
 
 ```bash
 curl --cacert /absolute/path/to/tls/server.crt \
-  -i https://app.team1.test/api/status
+  -i https://app.team1.test:8443/api/status
 ```
 
 **Load balancing**
@@ -223,7 +218,7 @@ curl --cacert /absolute/path/to/tls/server.crt \
 ```bash
 for i in {1..6}; do
   curl -sS --cacert /absolute/path/to/tls/server.crt \
-    -i https://app.team1.test/api/status
+    -i https://app.team1.test:8443/api/status
   echo
 done
 ```
@@ -235,9 +230,9 @@ Check the response body and `X-Backend` header to identify the responding backen
 From each machine, ping the other machines using their private IP addresses:
 
 ```bash
-ping -c 4 10.3.3.179
-ping -c 4 10.3.3.173
-ping -c 4 10.3.3.169
+ping -c 4 10.7.26.222
+ping -c 4 10.7.30.216
+ping -c 4 10.7.15.193
 ```
 
 Use the appropriate destination addresses for each source machine and record the actual results.

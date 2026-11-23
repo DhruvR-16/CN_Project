@@ -1,0 +1,7 @@
+# Per-machine addresses and generated command transcripts
+scripts/team.env
+Evidence/logs/
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]

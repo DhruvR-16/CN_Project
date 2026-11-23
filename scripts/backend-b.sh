@@ -9,8 +9,10 @@ network_inventory
 ping_team_hosts
 run "Python version" python3 --version
 run "Backend B source syntax" python3 -m py_compile "$REPO_DIR/backend-b/server.py"
-run "Backend B listener" lsof -nP -iTCP:"$BACKEND_B_PORT" -sTCP:LISTEN
-run "Backend B local status" curl --connect-timeout 3 --max-time 8 -i "http://127.0.0.1:${BACKEND_B_PORT}/api/status"
+if [[ "${1:-}" != "start" ]]; then
+  run "Backend B listener" lsof -nP -iTCP:"$BACKEND_B_PORT" -sTCP:LISTEN
+  run "Backend B local status" curl --connect-timeout 3 --max-time 8 -i "http://127.0.0.1:${BACKEND_B_PORT}/api/status"
+fi
 
 if [[ "${1:-}" == "start" ]]; then
   echo

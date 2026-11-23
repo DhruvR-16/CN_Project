@@ -140,7 +140,7 @@ The server certificate must include both DNS names:
 Because the project uses a self-signed certificate, provide the certificate to `curl` as a trusted CA certificate when testing:
 
 ```bash
-curl --cacert /absolute/path/to/tls/server.crt \
+curl --resolve app.team1.test:8443:10.7.26.222 --cacert /absolute/path/to/tls/server.crt \
   https://app.team1.test:8443/api/status
 ```
 
@@ -185,7 +185,7 @@ The `Cache-Control` header specifies a 60-second freshness period. The ETag iden
 To test conditional requests, send the matching ETag:
 
 ```bash
-curl --cacert /absolute/path/to/tls/server.crt \
+curl --resolve app.team1.test:8443:10.7.26.222 --cacert /absolute/path/to/tls/server.crt \
   -H 'If-None-Match: "team1-cache-v1"' \
   -i https://app.team1.test:8443/api/cache
 ```
@@ -194,14 +194,15 @@ When the resource matches that ETag, the backend implementation returns `304 Not
 
 ## 7. Testing
 
-Run these checks after starting the relevant services.
+Run the ordered evaluation runbook below. The runbook uses direct DNS queries and `curl --resolve` so it does not change a Mac's Wi-Fi DNS settings. Scripts save their output under `Evidence/logs/`.
 
 **DNS resolution**
 
 ```bash
-dig app.team1.test
-dig api.team1.test
-dig @8.8.8.8 app.team1.test
+source scripts/team.env
+dig "@$DNS_PRIMARY_IP" "$APP_HOST" A +noall +answer
+dig "@$DNS_PRIMARY_IP" "$API_HOST" A +noall +answer
+dig @8.8.8.8 "$APP_HOST" A
 ```
 
 The private DNS server should resolve the project names. The public resolver is expected to return `NXDOMAIN` when reachable and when the name is not publicly registered.
@@ -209,18 +210,15 @@ The private DNS server should resolve the project names. The public resolver is 
 **HTTPS and reverse proxy**
 
 ```bash
-curl --cacert /absolute/path/to/tls/server.crt \
-  -i https://app.team1.test:8443/api/status
+source scripts/team.env
+curl --cacert "$PWD/tls/server.crt" --resolve "$APP_HOST:$EDGE_PORT:$EDGE_PRIMARY_IP" \
+  -i "https://$APP_HOST:$EDGE_PORT/api/status"
 ```
 
 **Load balancing**
 
 ```bash
-for i in {1..6}; do
-  curl -sS --cacert /absolute/path/to/tls/server.crt \
-    -i https://app.team1.test:8443/api/status
-  echo
-done
+scripts/client-checks.sh baseline
 ```
 
 Check the response body and `X-Backend` header to identify the responding backend. The actual sequence depends on the Nginx upstream configuration and backend availability.
@@ -240,6 +238,253 @@ Use the appropriate destination addresses for each source machine and record the
 ## 8. Evidence
 
 The `Evidence` directory contains screenshots collected during project testing. Use them alongside the corresponding configuration and command output when documenting DNS resolution, HTTPS responses, backend selection, and caching behavior.
+
+## 9. One-pass evaluation runbook
+
+Run in order. Current IPs reported on 2026-11-23: Akhilesh/DNS `10.7.13.217`, Kavya/edge `10.7.26.222`, Dhruv/Backend A and backup DNS `10.7.30.216`, Lakshya/Backend B and standby-edge candidate `10.7.15.193`. Confirm these before testing because DHCP can change.
+
+**No Wi-Fi DNS changes:** these steps do not set or replace any Mac's DNS servers. Do not run `networksetup -setdnsservers`. `networksetup -getdnsservers` only reads the current setting. Akhilesh, Dhruv, and Lakshya reported no DNS servers listed for Wi-Fi; Kavya reported public resolvers `8.8.8.8` and `8.8.4.4`. These settings stay unchanged. Project DNS checks use `dig @DNS_IP`; HTTPS uses `curl --resolve`, preserving the hostname and certificate check. This does not prove automatic macOS resolver failover or client DNS-cache behavior.
+
+### Step 0: all Macs, prepare and confirm IPs
+
+```bash
+cd /path/to/CN_Project
+cp scripts/team.env.example scripts/team.env
+chmod +x scripts/*.sh
+echo "Computer: $(scutil --get ComputerName)"
+ipconfig getifaddr en0
+networksetup -getdnsservers "Wi-Fi"
+MY_IP="$(ipconfig getifaddr en0)"
+for PEER_IP in 10.7.13.217 10.7.26.222 10.7.30.216 10.7.15.193; do
+  if [ "$PEER_IP" != "$MY_IP" ]; then ping -c 3 "$PEER_IP"; fi
+done
+```
+
+If an address changed, update `scripts/team.env.example`, `nginx/nginx.conf`, and both dnsmasq records, then copy the updated example to each local `scripts/team.env`. Stop if any IP is stale.
+
+### Step 1: Akhilesh, primary DNS
+
+Back up and edit the active Homebrew dnsmasq file. Keep unrelated settings; replace old project records so these occur once:
+
+```bash
+DNS_CONF="$(brew --prefix)/etc/dnsmasq.conf"
+sudo cp "$DNS_CONF" "$DNS_CONF.team1-backup"
+sudo nano "$DNS_CONF"
+```
+
+```ini
+interface=en0
+listen-address=127.0.0.1,10.7.13.217
+bind-interfaces
+local-ttl=30
+address=/app.team1.test/10.7.26.222
+address=/api.team1.test/10.7.26.222
+```
+
+```bash
+sudo brew services restart dnsmasq
+sudo lsof -nP -iUDP:53 -iTCP:53
+dig @10.7.13.217 app.team1.test A +noall +answer
+dig @10.7.13.217 api.team1.test A +noall +answer
+scripts/dns-primary.sh
+```
+
+Both DNS answers should be `10.7.26.222`.
+
+### Step 2: Dhruv, backup DNS and Backend A
+
+Check port 53 first. Start the backup only if that port is free; keep this Terminal open:
+
+```bash
+cd /path/to/CN_Project
+sudo lsof -nP -iUDP:53 -iTCP:53
+cat > "$HOME/team1-dnsmasq-backup.conf" <<EOF
+port=53
+interface=en0
+listen-address=127.0.0.1,10.7.30.216
+bind-interfaces
+local-ttl=30
+address=/app.team1.test/10.7.26.222
+address=/api.team1.test/10.7.26.222
+EOF
+sudo dnsmasq --no-daemon --log-queries --conf-file="$HOME/team1-dnsmasq-backup.conf"
+```
+
+In a second Terminal on Dhruv's Mac:
+
+```bash
+cd /path/to/CN_Project
+dig @10.7.30.216 app.team1.test A +noall +answer
+dig @10.7.30.216 api.team1.test A +noall +answer
+scripts/backend-a.sh start
+```
+
+### Step 3: Lakshya, Backend B
+
+```bash
+cd /path/to/CN_Project
+scripts/backend-b.sh start
+```
+
+Leave the backend terminals open.
+
+### Step 4: Kavya, Nginx edge
+
+Confirm the config has upstreams `10.7.30.216:3001` and `10.7.15.193:3002`; confirm the certificate paths exist on Kavya's Mac. Test and check whether Nginx is already running:
+
+```bash
+cd /path/to/CN_Project
+nginx -t -c "$PWD/nginx/nginx.conf"
+lsof -nP -iTCP:8443 -sTCP:LISTEN
+```
+
+If already running, reload; otherwise, start. Run only one:
+
+```bash
+nginx -s reload -c "$PWD/nginx/nginx.conf"
+```
+
+```bash
+nginx -c "$PWD/nginx/nginx.conf"
+```
+
+Then:
+
+```bash
+lsof -nP -iTCP:8443 -sTCP:LISTEN
+scripts/edge-nginx.sh
+```
+
+### Step 5: client, Phase 1 baseline and packet capture
+
+```bash
+cd /path/to/CN_Project
+scripts/client-checks.sh baseline
+```
+
+Pass criteria: DNS answers point to the edge; HTTPS returns `200 OK` with trusted certificate; repeated requests show both `X-Backend: A` and `X-Backend: B`; cache headers include `Cache-Control` and `ETag`; conditional request returns `304 Not Modified`. Scripts save logs to `Evidence/logs/`. Stop and fix a required failing layer before moving on.
+
+Capture Wireshark on Wi-Fi (`en0`) while running the baseline and save the `.pcapng` under `Evidence/`. Display filters: `dns`, `tcp.port == 8443`, `tls.handshake`. Show DNS query/answer, TCP SYN/SYN-ACK/ACK, TLS handshake, encrypted data.
+
+### Step 6: Phase 1 five fault demos
+
+Restore each fault before the next test. Expected failures during injected faults are evidence.
+
+1. Wrong DNS server: `dig @8.8.8.8 app.team1.test A`, then `dig @10.7.13.217 app.team1.test A +noall +answer`; run `scripts/client-checks.sh wrong-dns`. This does not change Wi-Fi DNS.
+2. Wrong DNS target: on Akhilesh's Mac, temporarily change only the app dnsmasq record to `192.0.2.1`, restart dnsmasq, run `scripts/client-checks.sh wrong-dns-target`, then restore app record `10.7.26.222` and restart DNS. Verify using `dig @10.7.13.217 app.team1.test A +noall +answer`.
+3. Backend A stopped: Ctrl-C Dhruv's Backend A terminal; run `scripts/client-checks.sh backend-a-down`; restart with `scripts/backend-a.sh start`.
+4. Both backends stopped: Ctrl-C both backend terminals; run `scripts/client-checks.sh all-backends-down`; restart with `scripts/backend-a.sh start` and `scripts/backend-b.sh start`.
+5. Wrong port: run `scripts/client-checks.sh wrong-port`.
+
+### Step 7: Phase 2 A, backup DNS
+
+With both DNS services running, query each. Stop primary dnsmasq on Akhilesh, query backup directly again, then restore primary immediately:
+
+```bash
+dig @10.7.13.217 app.team1.test A +noall +answer
+dig @10.7.30.216 app.team1.test A +noall +answer
+sudo brew services stop dnsmasq
+dig @10.7.30.216 app.team1.test A +noall +answer
+sudo brew services start dnsmasq
+```
+
+This proves the backup resolver answers while primary is down. It does not prove automatic client failover; the assignment requires clients listing both private DNS servers. This runbook intentionally leaves Wi-Fi DNS unchanged, so report that limitation honestly.
+
+### Step 8: Phase 2 B, TTL and record change
+
+Both dnsmasq configs use `local-ttl=30`. Record the current answer. On Akhilesh's Mac, edit the primary config and set only the app record to `10.7.15.193`; restart primary. On Dhruv's Mac, edit the backup config to the same app record, stop the foreground backup with Ctrl-C in its running Terminal, then restart it:
+
+```bash
+sudo nano "$(brew --prefix)/etc/dnsmasq.conf"
+sudo brew services restart dnsmasq
+```
+
+```bash
+nano "$HOME/team1-dnsmasq-backup.conf"
+sudo dnsmasq --no-daemon --log-queries --conf-file="$HOME/team1-dnsmasq-backup.conf"
+```
+
+Then query both:
+
+```bash
+dig @10.7.13.217 app.team1.test A +noall +answer
+dig @10.7.30.216 app.team1.test A +noall +answer
+```
+
+Wait 35 seconds and capture the answer again. Restore both records to `10.7.26.222` by editing the same two files, then restart both DNS services using the commands above. Direct `dig @DNS_IP` bypasses client cache, so it cannot prove stale cached answers. Only on a client already using team DNS, inspect/flush the cache:
+
+```bash
+dscacheutil -q host -a name app.team1.test
+sudo dscacheutil -flushcache
+sudo killall -HUP mDNSResponder
+dscacheutil -q host -a name app.team1.test
+```
+
+### Step 9: Phase 2 C, backend firewall isolation
+
+The repo has no approved PF rules template. Obtain the exact faculty/admin-approved allow-edge/block-client rules and rollback commands before changing firewalls; do not replace macOS PF rules with an improvised ruleset. After the approved rules are applied on both backends, test from Kavya's edge:
+
+```bash
+source scripts/team.env
+curl --connect-timeout 4 --max-time 8 -i "http://$BACKEND_A_IP:$BACKEND_A_PORT/api/status"
+curl --connect-timeout 4 --max-time 8 -i "http://$BACKEND_B_IP:$BACKEND_B_PORT/api/status"
+```
+
+From another client, direct backend connections should fail:
+
+```bash
+source scripts/team.env
+nc -vz -G 3 "$BACKEND_A_IP" "$BACKEND_A_PORT"
+nc -vz -G 3 "$BACKEND_B_IP" "$BACKEND_B_PORT"
+```
+
+Run the approved rollback and repeat the edge checks. Do not report C complete until isolation and rollback both pass.
+
+### Step 10: Phase 2 D, backend failover
+
+Stop Backend A with Ctrl-C, run `scripts/client-checks.sh backend-a-down`, and confirm all successful responses show B. Restart A with `scripts/backend-a.sh start`, then run `scripts/client-checks.sh baseline` and confirm both IDs return. Explain Nginx is still a single point of failure.
+
+### Step 11: Phase 2 E, standby edge/cutover
+
+On Lakshya's Mac, make a standby config with local cert paths, validate, and start Nginx on port 8443 (Backend B uses 3002):
+
+```bash
+cd /path/to/CN_Project
+sed -e "s#/Users/kavyajain/CN-Project-Team1/tls/server.crt#$PWD/tls/server.crt#" \
+    -e "s#/Users/kavyajain/CN-Project-Team1/tls/server.key#$PWD/tls/server.key#" \
+    nginx/nginx.conf > "$HOME/team1-standby-nginx.conf"
+nginx -t -c "$HOME/team1-standby-nginx.conf"
+nginx -c "$HOME/team1-standby-nginx.conf"
+lsof -nP -iTCP:8443 -sTCP:LISTEN
+```
+
+From a client, verify standby TLS with the hostname retained:
+
+```bash
+source scripts/team.env
+curl --cacert "$PWD/tls/server.crt" --resolve "$APP_HOST:$EDGE_PORT:$EDGE_STANDBY_IP" \
+  -i "https://$APP_HOST:$EDGE_PORT/api/status"
+```
+
+Only continue after `200 OK`. Change the app record on both DNS servers to `10.7.15.193` using the edit/restart commands in Step 8, then run `scripts/client-checks.sh edge-cutover` and check direct answers with `dig @10.7.13.217 app.team1.test A +noall +answer` and `dig @10.7.30.216 app.team1.test A +noall +answer`. Restore both records to `10.7.26.222` using Step 8. Client cached cutover is only proven if that client uses team DNS.
+
+### Step 12: Phase 2 F and final presentation
+
+The instructor injects this fault during evaluation. Diagnose in order, without changing Wi-Fi DNS:
+
+```bash
+source scripts/team.env
+dig "@$DNS_PRIMARY_IP" "$APP_HOST" A +noall +answer
+nc -vz -G 3 "$EDGE_PRIMARY_IP" "$EDGE_PORT"
+curl --cacert "$PWD/tls/server.crt" --resolve "$APP_HOST:$EDGE_PORT:$EDGE_PRIMARY_IP" -v \
+  "https://$APP_HOST:$EDGE_PORT/api/status"
+curl --connect-timeout 4 --max-time 8 "http://$BACKEND_A_IP:$BACKEND_A_PORT/api/status"
+curl --connect-timeout 4 --max-time 8 "http://$BACKEND_B_IP:$BACKEND_B_PORT/api/status"
+```
+
+The final demo has 11 presentation steps, not 11 separate Phase 2 tests: (1) topology/roles, (2) IPs and LAN, (3) DNS, (4) trusted HTTPS, (5) load balancing, (6) Wireshark DNS/TCP/TLS, (7) cache/304, (8) Backend A outage, (9) Phase 2 DNS/TTL/edge resilience, (10) instructor fault diagnosis, and (11) individual viva. Extensions A-E require actual evidence; F is the live instructor challenge.
+
+After testing, restore both DNS A records to `10.7.26.222`, restart primary and backup DNS, run the approved PF rollback, and leave both backends and primary Nginx running. These steps do not change client Wi-Fi DNS settings.
 
 ## Security notes
 
